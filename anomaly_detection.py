@@ -2,19 +2,24 @@ import os
 import cv2
 import json
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 # --- Ayarlar ---
 CAPTION_JSON = "aligned_caption.json"
-MODEL_PATH = "runs/anomaly_yolo_train/weights/best.pt"
-VIDEO_PATH = "video865.mp4"
+MODEL_PATH = "./runs/vehicle_selected_yolo/weights/best.pt"
+VIDEO_PATH = "test_video2.mp4"
 
 RISKY_KEYWORDS = ["sudden", "fast", "crash", "hit", "crossing", "fall", "run", "danger"]
 DANGER_DISTANCE = 60
 TARGET_SIZE = 224
+INFERENCE_INTERVAL = 5  # her 5 frame'de bir tespit yap
+
+print("✅ GPU kullanılabilir mi:", torch.cuda.is_available())
 
 # --- YOLO Model ve Sınıf ID'leri ---
 model = YOLO(MODEL_PATH)
+print("📦 Model sınıfları:", model.names)
 class_map = {name.lower(): idx for idx, name in model.names.items()}
 PEDESTRIAN_ID = class_map.get("pedestrian", 0)
 VEHICLE_ID = class_map.get("vehicle", 1)
@@ -50,11 +55,11 @@ def letterbox_resize(image, target_size=224):
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
     return padded, scale, left, top
 
-# --- Caption verisi ---
+# --- Caption verisi yükle ---
 with open(CAPTION_JSON, "r", encoding="utf-8") as f:
     aligned_data = {os.path.basename(entry["frame_path"]): entry for entry in json.load(f)}
 
-# --- Video Göster ---
+# --- Video işle ---
 def detect_anomalies_on_video(video_path):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -62,6 +67,8 @@ def detect_anomalies_on_video(video_path):
         return
 
     frame_index = 0
+    results_cache = []
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -69,47 +76,54 @@ def detect_anomalies_on_video(video_path):
 
         h0, w0 = frame.shape[:2]
         resized, scale, left, top = letterbox_resize(frame, target_size=TARGET_SIZE)
-        results = model.predict(resized, conf=0.3, verbose=False)[0]
 
-        pedestrians, vehicles = [], []
+        # --- Tespit sadece her 5 frame’de bir yapılır ---
+        if frame_index % INFERENCE_INTERVAL == 0:
+            results = model.predict(resized, conf=0.1, verbose=False)[0]
+            pedestrians, vehicles = [], []
 
-        for box in results.boxes:
-            cls = int(box.cls[0])
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            for box in results.boxes:
+                cls = int(box.cls[0])
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
 
-            # Geri ölçekleme (224 -> orijinal)
-            x1 = (x1 - left) / scale
-            x2 = (x2 - left) / scale
-            y1 = (y1 - top) / scale
-            y2 = (y2 - top) / scale
+                # Geri ölçekleme (224 → orijinal)
+                x1 = (x1 - left) / scale
+                x2 = (x2 - left) / scale
+                y1 = (y1 - top) / scale
+                y2 = (y2 - top) / scale
 
-            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            w, h = x2 - x1, y2 - y1
-            box_data = [x1, y1, w, h]
+                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+                w, h = x2 - x1, y2 - y1
+                box_data = [x1, y1, w, h]
 
-            if cls == PEDESTRIAN_ID:
-                pedestrians.append(box_data)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, "Pedestrian", (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            elif cls == VEHICLE_ID:
-                vehicles.append(box_data)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, "Vehicle", (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                if cls == PEDESTRIAN_ID:
+                    pedestrians.append(box_data)
+                elif cls == VEHICLE_ID:
+                    vehicles.append(box_data)
+
+            results_cache = (pedestrians, vehicles)
+        else:
+            pedestrians, vehicles = results_cache
+
+        # --- Görselleştirme ---
+        for box in pedestrians:
+            x, y, w, h = box
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, "Pedestrian", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        for box in vehicles:
+            x, y, w, h = box
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            cv2.putText(frame, "Vehicle", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
         # --- Caption & Mesafe analiz ---
         frame_name = f"frame_{frame_index:05d}.jpg"
         caption_data = aligned_data.get(frame_name, {})
-
-        danger = False
-        if is_too_close(pedestrians, vehicles):
-            danger = True
-
         caption_text = caption_data.get("caption_pedestrian", "") + " " + caption_data.get("caption_vehicle", "")
-        if is_caption_risky(caption_text):
-            danger = True
+
+        danger = is_too_close(pedestrians, vehicles) or is_caption_risky(caption_text)
 
         if danger:
             cv2.putText(frame, "🚨 TEHLIKE TESPIT EDILDI!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
@@ -117,7 +131,9 @@ def detect_anomalies_on_video(video_path):
             cv2.putText(frame, "✅ NORMAL", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 0), 2)
 
         cv2.imshow("Anomaly Detection", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+
+        # 30 FPS'e yakın göstermek için bekleme süresi: 33 ms
+        if cv2.waitKey(33) & 0xFF == ord("q"):
             break
 
         frame_index += 1

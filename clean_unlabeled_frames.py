@@ -3,7 +3,7 @@ from glob import glob
 
 def clean_unlabeled_frames(image_root, label_root):
     removed = 0
-    for split in ["train", "val"]:
+    for split in ["train"]:
         img_dir = os.path.join(image_root, split)
         lbl_dir = os.path.join(label_root, split)
 

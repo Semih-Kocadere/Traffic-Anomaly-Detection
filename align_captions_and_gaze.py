@@ -2,8 +2,8 @@ import os
 import json
 from tqdm import tqdm
 
-CAPTION_ROOT = "./DatasetVision/wts_dataset/wts_dataset_zip/annotations/annotations/caption/train"
-GAZE_ROOT = "./DatasetVision/wts_dataset/wts_dataset_zip/annotations/annotations/3D_gaze/train"
+CAPTION_ROOT = "./annotations/caption/train"
+GAZE_ROOT = "./annotations/3D_gaze/train"
 MAPPING_FILE = "frame_video_mapping.json"
 OUTPUT_JSON = "aligned_caption.json"
 
